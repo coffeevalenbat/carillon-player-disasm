@@ -1,6 +1,9 @@
 # This file contains project-specific configuration.
 # You can override variables set in the Makefile here.
 
+CARILLON_MODULE := assets/modules/oldschool.carillon
+# Enable sample playback
+ASFLAGS += -D_CARILLON_SAMPLE_PLAYBACK
 
 # Value that the ROM will be filled with.
 PADVALUE := 0xFF
@@ -11,14 +14,14 @@ PADVALUE := 0xFF
 VERSION := 0
 
 # 4-ASCII letter game ID.
-GAMEID := BOIL
+GAMEID := 
 
 # Game title, up to 11 ASCII chars.
-TITLE := BOILERPLATE
+TITLE := MUSIC
 
 # New licensee, 2 ASCII chars.
 # Homebrew games FTW!.
-LICENSEE := HB
+LICENSEE := 
 # Old licensee, please set to 0x33 (required to get SGB compatibility).
 OLDLIC := 0x33
 
@@ -26,7 +29,7 @@ OLDLIC := 0x33
 # You can get a list of valid values by running `rgbfix -m help`.
 # See https://gbdev.io/pandocs/MBCs for more information, or consult any copy of Pan Docs.
 # If using no MBC, consider enabling `-t` below.
-MBC := 0x00
+MBC := MBC5
 
 # ROM size is set automatically by RGBFIX.
 
@@ -36,8 +39,8 @@ MBC := 0x00
 SRAMSIZE := 0x00
 
 # ROM name.
-ROMNAME := boilerplate
-ROMEXT  := gb
+ROMNAME := carillonPlayer
+ROMEXT  := gbc
 
 
 # Compilation parameters, uncomment to apply, comment to cancel.
@@ -50,7 +53,7 @@ ROMEXT  := gb
 # ASFLAGS += -E
 
 # Game Boy Color compatible.
-# FIXFLAGS += -c
+FIXFLAGS += -c
 # Game Boy Color required.
 # FIXFLAGS += -C
 

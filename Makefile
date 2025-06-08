@@ -25,7 +25,7 @@ ROM = bin/${ROMNAME}.${ROMEXT}
 # Argument constants
 INCDIRS  = src/ include/
 WARNINGS = all extra
-ASFLAGS  = -p ${PADVALUE} $(addprefix -I,${INCDIRS}) $(addprefix -W,${WARNINGS})
+ASFLAGS  = -p ${PADVALUE} $(addprefix -I,${INCDIRS}) $(addprefix -W,${WARNINGS}) -D_CARILLON_MODULE=${CARILLON_MODULE}
 LDFLAGS  = -p ${PADVALUE}
 FIXFLAGS = -p ${PADVALUE} -i "${GAMEID}" -k "${LICENSEE}" -l ${OLDLIC} -m ${MBC} -n ${VERSION} -r ${SRAMSIZE} -t ${TITLE}
 
@@ -57,11 +57,24 @@ rebuild:
 # "Source" assets can thus be safely stored there without `make clean` removing them!
 VPATH := src
 
-# Define how to compress files using the PackBits16 codec.
-# (The compressor script requires Python 3.)
-assets/%.pb16: src/tools/pb16.py assets/%
+# To catch bad flags
+%.flags:
 	@${MKDIR_P} "${@D}"
-	$^ $@
+	touch $@
+
+# Tile graphics
+assets/%.2bpp: assets/%.flags assets/%.png
+	@${MKDIR_P} "${@D}"
+	${RGBGFX} -o $@ @$^
+
+assets/%.pal: assets/%.flags assets/%.png
+	@${MKDIR_P} "${@D}"
+	${RGBGFX} -p $@ @$^
+
+# Define how to parse Carillon Save files.
+assets/%.carillon: assets/%.sav
+	@${MKDIR_P} "${@D}"
+	src/tools/caroline.py --sav $^ -o $@
 
 # How to build a ROM.
 # Notice that the build date is always refreshed.

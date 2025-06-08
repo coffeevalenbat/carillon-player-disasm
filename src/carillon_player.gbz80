@@ -1,0 +1,1314 @@
+; Disassembly of Carillon Player v1.0, released in 2001
+; Original by Aleksi Eeben/Heatbeat
+; Disassembled by Coffee 'Valen' Bat
+; TODO: Find exact release date: 
+;		HB Hub says December 2000 but Aleksi's page for Carillon has snapshots 
+;		from October 2000 https://web.archive.org/web/20001027202442/http://www.student.oulu.fi/~aeeben/carillon.html 
+;		Filedate for example ROMs are from January 2001.
+; TODO: Clean up symbol naming a bit
+; TODO: Debugfile support
+; TODO: Fix "Where to put WRAM def" caveat
+
+include "carillon.inc"
+
+SECTION "Carillon Player WRAM", WRAM0, align[6]
+; Variable info taken from using_carillon.html
+wCarillonWRAM::
+
+; New music note data is read at the current tempo (Speed) when MusicFlag = $00.
+; Music is stopped when MusicFlag = $01 (No more new notes are read).
+; MusicFlag is set to $01 when the end of music data is reached (Some channels may still be active).
+wMusicFlags: db
+
+; Current Tempo
+; Default = $07, changed using command TMPx in block data.
+wMusicSpeed: db
+
+; Step time counter
+; Starts at value in Speed, decremented by one every frame. One step is advanced when StepP = Speed/2 or StepP = $00.
+wRowTicksLeft: db
+
+; Current step (n *$08)
+wCurRow: db
+
+; Current block (block number + $50)
+wCurPatt: db
+
+; Current position in Block Order List
+; In Player_MusicSelect SequencerP is set to (actual song starting position - 1) and PatternP is set to $00.
+wCurOrder: db
+
+FOR CH, 1, 5
+; Bit 2: (Only CH3) Ch3 reserved for playing a sample trigged in music data (1 = yes, 0 = no)
+; Bit 1: ChX reserved for sound FX routines (1 = yes, 0 = no)
+; Bit 0: ChX music note playing (1 = no, 0 = yes)
+; When ChXFlags is not $00, no instrument sound data is read and all ChX sound registers (rNRXy) remain intact.
+	wCH{u:CH}Flags:: db
+
+; Countdown (in frames) before moving to next step in sound data
+	wCH{u:CH}TicksLeft: db
+
+IF CH == 3
+; Current Waveform (n * $10) in Waveform RAM
+	wCH{u:CH}Wave: db
+ENDC
+
+; High nybble: ChX Sound number
+; Low nybble: Current step in sound data
+	wCH{u:CH}InstPtr: db
+
+IF CH != 4
+; Current ChX Note (before arpeggiato)
+	wCH{u:CH}Note: db
+
+; ChX Frequency (before modulation/slide)
+	wCH{u:CH}Freq: dw
+ENDC
+ENDR
+
+; Internally set when Waveform RAM is reloaded
+wCH3Init: db
+	
+; Bit 7: Vibrato/Slide
+; Bit 2: Modulate Ch3
+; Bit 1: Modulate Ch2
+; Bit 0: Modulate Ch1
+wModFlags: db
+
+; Vibrato Phase (and Width)
+wVibSize: db
+
+; Vibrato Speed
+wVibSpeed: db
+	
+; Slide Add Low-order byte
+wModAddLow: db
+
+; Current Slide Amount Low-order byte
+wModLow: db
+
+; Slide Add High-order byte
+wModAddHigh: db
+
+; Current Slide Amount High-order byte
+wModHigh: db
+
+; Sample Address word
+wSampleAddr: dw
+
+; Sample blocks left to play
+wSampleBlocksLeft: db
+
+; "Used for timing"
+; Ticks down how many calls to `Player_SampleUpdate` to wait before feeding sample data.
+wTrigCount: db
+
+; Pan position for trigged sample
+wNewPanMask: db
+
+; "Temporary storage for trigging sample"
+; Copied over to wSampleAddr once wTrigCount reaches zero, Possibly handled like this to avoid 
+; corruption if a sample was read midway through triggering a new sample
+wNewSample: dw
+
+; Sample blocks left to play
+wNewSampleBlocksLeft: db
+
+;; These are never refered or used by Carillon, but are labeled here for completion's sake and because the clear loop also clears these
+
+; FX Hammer: Priority of current Sound FX playing ($00 = lowest)
+wFXCurrentPriority:: db
+
+; FX Hammer: Countdown (in frames) before moving to next step in Sound FX
+wFXTicksLeft:: db
+
+; FX Hammer: Current Step
+wFXCurRow:: db
+
+; FX Hammer: Current Sound FX (FX number + $44)
+wFXIndex:: db
+
+wCarillonWRAM.end::
+
+DEF _CRLN_ROM	EQUS "ROMX"
+
+IF DEF(MATCH_BASEROM)
+	; Use original hardcoded addresses
+	IF DEF(_CRLN_USE_SAMPLE_PLAYER)
+		REDEF _CRLN_ROM 	EQUS "ROMX[_ROMBANK], BANK[2]"
+	ELSE
+		REDEF _CRLN_ROM 	EQUS "ROMX[_ROMBANK], BANK[1]"
+	ENDC
+ENDC
+
+SECTION "Carillon Player Code", _CRLN_ROM
+; Jump table
+Player_Initialize::
+	jp carillonInit
+
+Player_MusicStart::
+	jp carillonPlaySong
+
+Player_MusicStop::
+	jp carillonStopSong
+
+; Uncodumented in jump table, possibly to save on the jump cycles
+;Player_MusicUpdate::
+	jp carillonTickSound
+
+Player_SongSelect::
+	jp carillonSelectSong
+
+carillonThumb:
+	PUSHC main
+	db "CARILLON PLAYER Version 1.0 (c)2000 Aleksi Eeben (email:aleksi@cncd.fi)"
+	POPC
+
+;; Initializes hardware sound registers and player variables at $c7c0-$c7ef. 
+;; Call this at program startup before using any other Carillon Player or FX Hammer routines.
+;; This routine is not needed at later time except for that if you need to disable all the 
+;; sound circuits (by writing $00 to rNR52) for example during pause mode.
+; @destroy af c hl
+carillonInit::
+	; Enable and clear APU
+	ld a, AUDENA_ON
+	ldh [rAUDENA], a
+	xor a
+	; Start of APU memory
+	ld hl, rAUD1SWEEP
+	assert (rAUDVOL - rAUD1SWEEP) & 1 == 0, "Size must be Eeben!"
+	ld c, (rAUDVOL - rAUD1SWEEP) / 2
+	:ld [hli], a
+	ld [hli], a
+	dec c
+	jr nz, :-
+
+	; Clear player variables
+	ld hl, wCarillonWRAM
+	assert (wCarillonWRAM.end - wCarillonWRAM) & 1 == 0, "Size must be Eeben!"
+	ld c, (wCarillonWRAM.end - wCarillonWRAM) / 2
+	:ld [hli], a
+	ld [hli], a
+	dec c
+	jr nz, :-
+
+	ld a, AUDVOLF_LEFT | AUDVOLF_RIGHT
+	ldh [rAUDVOL], a
+
+	; Set to invalid value to assure a wave reload
+	ld [wCH3Wave], a
+
+	ld a, CHF_NOTE_NOT_PLAYING
+	ld [wCH1Flags], a
+	ld [wCH2Flags], a
+	ld [wCH3Flags], a
+	ld [wCH4Flags], a
+	assert CHF_NOTE_NOT_PLAYING == MUSICF_STOPPED
+	ld [wMusicFlags], a
+	ret
+
+;; Starts playing song number 0. Call carillonSelectSong right after this call to select another song.
+; @destroy af hl
+carillonPlaySong::
+	ld hl, wMusicFlags
+	xor a
+	ld [hli], a
+
+	assert wMusicFlags + 1 == wMusicSpeed
+	ld a, DEFAULT_MUSICSPEED
+	ld [hli], a
+
+	assert wMusicSpeed + 1 == wRowTicksLeft
+	ld a, $01
+	ld [hli], a
+
+	assert wRowTicksLeft + 1 == wCurRow
+	xor a
+	ld [hli], a
+	inc l
+
+	; Set order to -1 due to preinc
+	cpl
+	assert wCurRow + 2 == wCurOrder
+	ld [hl], a
+
+.resetChannels:
+FOR CH, 1, 5
+	ld l, LOW(wCH{u:CH}Flags)
+	IF CH != 3
+		set CHB_NOTE_NOT_PLAYING, [hl]
+	ELSE
+		ld a, [hl]
+		and LOW(~CHF_RESERVED_SMP)
+		or CHF_NOTE_NOT_PLAYING
+		ld [hl], a
+	ENDC
+	bit CHB_RESERVED_FX, [hl]
+	jr nz, :+
+		; If channel is not being used for SFX, reset it
+		IF CH != 3
+			ld a, AUD{u:CH}ENVF_DIR
+			ldh [rAUD{u:CH}ENV], a
+			ld a, AUD{u:CH}GO_RESTART
+			ldh [rAUD{u:CH}GO], a
+		ELSE
+			xor a
+			ldh [rAUD3LEVEL], a
+			ld l, LOW(wSampleBlocksLeft)
+			ld [hli], a
+			assert wSampleBlocksLeft + 1 == wTrigCount
+			ld [hl], a
+			cpl
+			ld [wCH3Wave], a
+		ENDC
+	:
+ENDR
+	ret
+
+;; Stops playing the current song. Any sound FX currently playing are not affected.
+;; Note: Calling this routine is not necessary when switching to a different song or Music Bank.
+; @destroy af hl
+carillonStopSong::
+	ld hl, wMusicFlags
+	ld a, MUSICF_STOPPED
+	ld [hl], a
+	jr carillonPlaySong.resetChannels
+
+;; Call this to select a song other than song number zero. Load register A with song number (0 - 7). 
+;; Always call Player_MusicStart before calling this routine.
+; @param a: Index of song to select (0-7).
+; @destroy af hl
+carillonSelectSong::
+	ld hl, songOrderOffsets
+	add l
+	ld l, a
+	ld a, [hl]
+	ld [wCurOrder], a
+	ret
+
+songOrderOffsets:
+; This table was probably supposed to be altered in runtime by the editor, 
+; but in the end all song start points are fixed.
+; Kinda looks like it's 0-7 but bit reversed. Interesting!
+; Song 0 - Starting at $00
+	db LOW($00 - 1)
+; Song 1 - Starting at $80
+	db LOW($80 - 1)
+; Song 2 - Starting at $40
+	db LOW($40 - 1)
+; Song 3 - Starting at $c0
+	db LOW($C0 - 1)
+; Song 4 - Starting at $20
+	db LOW($20 - 1)
+; Song 5 - Starting at $60
+	db LOW($60 - 1)
+; Song 6 - Starting at $a0
+	db LOW($A0 - 1)
+; Song 7 - Starting at $e0
+	db LOW($E0 - 1)
+
+; Pad table
+	ds align[8]
+
+Player_MusicUpdate::
+carillonTickSound::
+	xor a
+	ld hl, wCH3Init
+	ld [hli], a
+	assert wCH3Init + 1 == wModFlags
+	ld a, [hli]
+	or a
+	jr z, .noModulation
+		bit MODB_TYPE, a
+		jr nz, .modSlide
+	.modVibrato:
+		assert wModFlags + 1 == wVibSize
+		ld a, [hli]
+		assert wVibSize + 1 == wVibSpeed
+		add [hl]
+		and $1F
+		dec l
+		ld b, a
+		ld a, [hl]
+		and $E0
+		add b
+		ld [hl], a
+		ld l, a
+		ld h, HIGH(vibratoTable)
+		ld a, [hl]
+		ld [wModLow], a
+		; Sign extend modulo
+		bit 7, a
+		jr nz, :+
+			xor a
+			ld [wModHigh], a
+			jr .noModulation
+		:
+		ld a, HIGH(-1)
+		ld [wModHigh], a
+		jr .noModulation
+	.modSlide:
+		ld l, LOW(wModAddLow)
+		ld a, [hli]
+		assert wModAddLow + 1 == wModLow
+		add [hl]
+		ld [hli], a
+		assert wModLow + 1 == wModAddHigh
+		ld a, [hli]
+		assert wModAddHigh + 1 == wModHigh
+		adc [hl]
+		ld [hl], a
+.noModulation:
+
+carillonTickSound_updateInstCH1:
+	ld hl, wCH1Flags
+	ld a, [hli]
+	or a
+	jp nz, .end
+	; Tick down row timer
+	dec [hl]
+	jp nz, .rowTicksLeft
+.readRow:
+	ld de, wCH1InstPtr
+	ld a, [de]
+	ld l, a
+	ld h, HIGH(instPulseVolLen)
+	and $0F
+	or a ; Not necessary
+	jr nz, .notFirstRow
+		; First row of inst data
+		ld a, l
+		swap a
+		and $0F
+		add LOW(instPanTable.ch1)
+		ld c, a
+		ld b, HIGH(instPanTable.ch1)
+		ld a, [bc]
+		ld b, a
+		ldh a, [rAUDTERM]
+		and LOW(~($11 << (1 - 1)))
+		or b
+		ldh [rAUDTERM], a
+.processAfterLoop:
+.notFirstRow:
+	ld a, [hl]
+	or a
+	jr z, .testEnd
+.processRow:
+	ld b, a
+	and AUD1ENVF_INIT_VOL
+	or AUD1ENVF_DIR
+	ldh [rAUD1ENV], a
+	ld a, b
+	and $0F
+
+	assert wCH1InstPtr - 1 == wCH1TicksLeft
+	dec e
+	ld [de], a
+	
+	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
+	inc h
+	ld a, [hli]
+	sra a
+	rr b
+	sra a
+	rr b
+	add a
+	; H = Note index * 2
+	ld h, a
+	; A = Pulse for row
+	ld a, b
+	and AUD1LENF_DUTY
+	ldh [rAUD1LEN], a
+	ld a, l
+	inc e
+	; Write back to instptr
+	ld [de], a
+	ld b, HIGH(freqTable)
+	assert wCH1InstPtr + 1 == wCH1Note
+	inc e
+	ld a, [de]
+	add h
+	ld c, a
+	ld a, [wModFlags]
+	bit MODB_CH1, a
+	jr nz, .applyMod
+.directPitch:
+	ld a, [bc]
+	ldh [rAUD1LOW], a
+	assert wCH1Note + 1 == wCH1Freq
+	inc e
+	ld [de], a
+	inc c
+	ld a, [bc]
+	inc e
+	ld [de], a
+	or AUD1GO_RESTART
+	ldh [rAUD1GO], a
+	jr .end
+.applyMod:
+	ld a, [bc]
+	inc c
+	inc e
+	ld [de], a
+	inc e
+	ld hl, wModLow
+	add [hl]
+	ldh [rAUD1LOW], a
+	ld a, [bc]
+	ld [de], a
+	ld l, LOW(wModHigh)
+	adc [hl]
+	or AUD1GO_RESTART
+	ldh [rAUD1GO], a
+	jr .end
+.testEnd:
+	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
+	inc h
+	ld b, [hl]
+	cpl
+	xor b
+	; If NoteDuty/NoiseFreq == FF, end instrument
+	jr z, .endInst
+.loopInst:
+	; Else, jump to B row
+	ld a, l
+	and $F0
+	add b
+	ld [de], a
+	ld l, a
+	dec h
+	jr .processAfterLoop
+.endInst:
+	ld a, AUD1ENVF_DIR
+	ldh [rAUD1ENV], a
+	ld a, AUD1GO_RESTART
+	ldh [rAUD1GO], a
+	ld hl, wCH1Flags
+	set CHB_NOTE_NOT_PLAYING, [hl]
+	jr .end
+.rowTicksLeft:
+	; If no update needed just apply mod
+	ld hl, wModFlags
+	bit MODB_CH1, [hl]
+	jr z, .end
+	ld de, wCH1Freq
+	ld a, [de]
+	inc e
+	ld l, LOW(wModLow)
+	add [hl]
+	ldh [rAUD1LOW], a
+	ld a, [de]
+	ld l, LOW(wModHigh)
+	adc [hl]
+	ldh [rAUD1GO], a
+.end:
+
+carillonTickSound_updateInstCH2:
+	ld hl, wCH2Flags
+	ld a, [hli]
+	or a
+	jp nz, .end
+	; Tick down row timer
+	dec [hl]
+	jp nz, .rowTicksLeft
+.readRow:
+	ld de, wCH2InstPtr
+	ld a, [de]
+	ld l, a
+	ld h, HIGH(instPulseVolLen)
+	and $0F
+	or a ; Not necessary
+	jr nz, .notFirstRow
+		; First row of inst data
+		ld a, l
+		swap a
+		and $0F
+		add LOW(instPanTable.ch2)
+		ld c, a
+		ld b, HIGH(instPanTable.ch2)
+		ld a, [bc]
+		; Shift left to align with AUDTERM
+		add a
+		ld b, a
+		ldh a, [rAUDTERM]
+		and LOW(~($11 << (2 - 1)))
+		or b
+		ldh [rAUDTERM], a
+.processAfterLoop:
+.notFirstRow:
+	ld a, [hl]
+	or a
+	jr z, .testEnd
+.processRow:
+	ld b, a
+	and AUD2ENVF_INIT_VOL
+	or AUD2ENVF_DIR
+	ldh [rAUD2ENV], a
+	ld a, b
+	and $0F
+
+	assert wCH2InstPtr - 1 == wCH2TicksLeft
+	dec e
+	ld [de], a
+	
+	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
+	inc h
+	ld a, [hli]
+	sra a
+	rr b
+	sra a
+	rr b
+	add a
+	; H = Note index * 2
+	ld h, a
+	; A = Pulse for row
+	ld a, b
+	and AUD2LENF_DUTY
+	ldh [rAUD2LEN], a
+	ld a, l
+	inc e
+	; Write back to instptr
+	ld [de], a
+	ld b, HIGH(freqTable)
+	assert wCH2InstPtr + 1 == wCH2Note
+	inc e
+	ld a, [de]
+	add h
+	ld c, a
+	ld a, [wModFlags]
+	bit MODB_CH2, a
+	jr nz, .applyMod
+.directPitch:
+	ld a, [bc]
+	ldh [rAUD2LOW], a
+	assert wCH2Note + 1 == wCH2Freq
+	inc e
+	ld [de], a
+	inc c
+	ld a, [bc]
+	inc e
+	ld [de], a
+	or AUD2GO_RESTART
+	ldh [rAUD2GO], a
+	jr .end
+.applyMod:
+	ld a, [bc]
+	inc c
+	inc e
+	ld [de], a
+	inc e
+	ld hl, wModLow
+	add [hl]
+	ldh [rAUD2LOW], a
+	ld a, [bc]
+	ld [de], a
+	ld l, LOW(wModHigh)
+	adc [hl]
+	or AUD2GO_RESTART
+	ldh [rAUD2GO], a
+	jr .end
+.testEnd:
+	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
+	inc h
+	ld b, [hl]
+	cpl
+	xor b
+	; If NoteDuty/NoiseFreq == FF, end instrument
+	jr z, .endInst
+.loopInst:
+	; Else, jump to B row
+	ld a, l
+	and $F0
+	add b
+	ld [de], a
+	ld l, a
+	dec h
+	jr .processAfterLoop
+.endInst:
+	ld a, AUD2ENVF_DIR
+	ldh [rAUD2ENV], a
+	ld a, AUD2GO_RESTART
+	ldh [rAUD2GO], a
+	ld hl, wCH2Flags
+	set CHB_NOTE_NOT_PLAYING, [hl]
+	jr .end
+.rowTicksLeft:
+	; If no update needed just apply mod
+	ld hl, wModFlags
+	bit MODB_CH2, [hl]
+	jr z, .end
+	ld de, wCH2Freq
+	ld a, [de]
+	inc e
+	ld l, LOW(wModLow)
+	add [hl]
+	ldh [rAUD2LOW], a
+	ld a, [de]
+	ld l, LOW(wModHigh)
+	adc [hl]
+	ldh [rAUD2GO], a
+.end:
+
+carillonTickSound_updateInst3:
+	ld hl, wCH3Flags
+	ld a, [hli]
+	or a
+	jp nz, .end
+	; Tick down row timer
+	dec [hl]
+	jp nz, .rowTicksLeft
+.readRow:
+	ld de, wCH3InstPtr
+	ld a, [de]
+	ld l, a
+	ld h, HIGH(instWaveIndexLen)
+	and $0F
+	or a ; Not necessary
+	jr nz, .notFirstRow
+		; First row of inst data
+		ld a, l
+		swap a
+		and $0F
+		add LOW(instPanTable.ch3)
+		ld c, a
+		ld b, HIGH(instPanTable.ch3)
+		ld a, [bc]
+		; Shift left to align with AUDTERM
+		add a
+		add a
+		ld b, a
+		ldh a, [rAUDTERM]
+		and LOW(~($11 << (3 - 1)))
+		or b
+		ldh [rAUDTERM], a
+.processAfterLoop:
+.notFirstRow:
+	; For some reason CH3 flips around the code order of testEnd and processRow
+	ld a, [hl]
+	or a
+	jr nz, .processRow
+.testEnd:
+	assert HIGH(instWaveIndexLen) + 1 == HIGH(instWaveNoteVol)
+	inc h
+	ld b, [hl]
+	cpl
+	xor b
+	; If NoteVol == FF, end instrument
+	jr z, .endInst
+.loopInst:
+	; Else, jump to B row
+	ld a, l
+	and $F0
+	add b
+	ld [de], a
+	ld l, a
+	dec h
+	jr .processAfterLoop
+.endInst:
+	xor a
+	ldh [rAUD3LEVEL], a
+	ld hl, wCH3Flags
+	set CHB_NOTE_NOT_PLAYING, [hl]
+	jp .end
+.processRow:
+	ld b, a
+	and $F0
+	assert wCH3InstPtr - 1 == wCH3Wave
+	dec e
+	ld c, a
+	ld a, [de]
+	cp c
+	jr z, .noWaveReload
+.waveReload:
+	push hl
+	ld a, c
+	ld [de], a
+	ld l, a
+	ld h, HIGH(waveTable)
+	xor a
+	ldh [rAUD3ENA], a
+	FOR N, AUD3WAVE_SIZE
+		IF N != (AUD3WAVE_SIZE - 1)
+			ld a, [hli]
+		ELSE
+			ld a, [hl]
+		ENDC
+		ldh [rAUD3WAVE_{X:N}], a
+	ENDR
+	ld a, AUD3ENA_ON
+	ldh [rAUD3ENA], a
+	assert AUD3ENA_ON == CH3F_INIT
+	ld [wCH3Init], a
+	pop hl
+.noWaveReload:
+	ld a, b
+	and $0F
+	ld e, LOW(wCH3TicksLeft)
+	ld [de], a
+	assert HIGH(instWaveIndexLen) + 1 == HIGH(instWaveNoteVol)
+	inc h
+	ld a, [hli]
+	; Rip out volume and note index
+	sra a
+	rr b
+	sra a
+	rr b
+	add a
+	sra b
+	ld h, a
+	ld a, b
+	and AUD3LEVELF_VOLUME
+	ldh [rAUD3LEVEL], a
+	ld a, l
+	ld e, LOW(wCH3InstPtr)
+	; Write back to instptr
+	ld [de], a
+	ld b, HIGH(freqTable)
+	assert wCH3InstPtr + 1 == wCH3Note
+	inc e
+	ld a, [de]
+	add h
+	ld c, a
+	ld a, [wModFlags]
+	bit MODB_CH3, a
+	jr nz, .applyMod
+.directPitch:
+	ld a, [bc]
+	ldh [rAUD3LOW], a
+	assert wCH3Note + 1 == wCH3Freq
+	inc e
+	ld [de], a
+	inc c
+	ld a, [bc]
+	inc e
+	ld [de], a
+	assert CH3F_INIT == AUD3GO_RESTART
+	ld hl, wCH3Init
+	add [hl]
+	ldh [rAUD3GO], a
+	; Why do 2000s sound engines have an obsession with clearing the length register
+	; Was this something provoked by bad emulation/documentation?
+	xor a
+	ldh [rAUD3LEN], a
+	jr .end
+.applyMod:
+	ld a, [bc]
+	inc c
+	inc e
+	ld [de], a
+	inc e
+	ld hl, wModLow
+	add [hl]
+	ldh [rAUD3LOW], a
+	ld a, [bc]
+	ld [de], a
+	ld l, LOW(wModHigh)
+	adc [hl]
+	assert CH3F_INIT == AUD3GO_RESTART
+	ld hl, wCH3Init
+	add [hl]
+	ldh [rAUD3GO], a
+	xor a
+	ldh [rAUD3LEN], a
+	jr .end
+.rowTicksLeft:
+	; If no update needed just apply mod
+	ld hl, wModFlags
+	bit MODB_CH3, [hl]
+	jr z, .end
+	ld de, wCH3Freq
+	ld a, [de]
+	inc e
+	ld l, LOW(wModLow)
+	add [hl]
+	ldh [rAUD3LOW], a
+	ld a, [de]
+	ld l, LOW(wModHigh)
+	adc [hl]
+	ldh [rAUD3GO], a
+	xor a
+	ldh [rAUD3LEN], a
+.end:
+
+carillonTickSound_updateInstCH4:
+	ld hl, wCH4Flags
+	ld a, [hli]
+	or a
+	jr nz, .end
+	; Tick down row timer
+	dec [hl]
+	jr nz, .end
+.readRow:
+	ld de, wCH4InstPtr
+	ld a, [de]
+	ld l, a
+	ld h, HIGH(instNoiseVolLen)
+	and $0F
+	or a ; Not necessary
+	jr nz, .notFirstRow
+		; First row of inst data
+		ld a, l
+		swap a
+		and $0F
+		add LOW(instPanTable.ch4)
+		ld c, a
+		ld b, HIGH(instPanTable.ch4)
+		ld a, [bc]
+		; Shift left to align with AUDTERM
+		add a
+		add a
+		add a
+		ld b, a
+		ldh a, [rAUDTERM]
+		and LOW(~($11 << (4 - 1)))
+		or b
+		ldh [rAUDTERM], a
+.processAfterLoop:
+.notFirstRow:
+	ld a, [hl]
+	or a
+	jr z, .testEnd
+.processRow:
+	ld b, a
+	and AUD4ENVF_INIT_VOL
+	or AUD4ENVF_DIR
+	ldh [rAUD4ENV], a
+	ld a, b
+	and $0F
+
+	assert wCH4InstPtr - 1 == wCH4TicksLeft
+	dec e
+	ld [de], a
+
+	assert HIGH(instNoiseVolLen) + 1 == HIGH(instNoiseFreq)
+	inc h
+	ld a, [hli]
+	ldh [rAUD4POLY], a
+	ld a, l
+	inc e
+	ld [de], a
+	ld a, AUD4GO_RESTART
+	ldh [rAUD4GO], a
+	jr .end
+.testEnd:
+	assert HIGH(instNoiseVolLen) + 1 == HIGH(instNoiseFreq)
+	inc h
+	ld b, [hl]
+	cpl
+	xor b
+	; If NoteDuty/NoiseFreq == FF, end instrument
+	jr z, .endInst
+.loopInst:
+	; Else, jump to B row
+	ld a, l
+	and $F0
+	add b
+	ld [de], a
+	ld l, a
+	dec h
+	jr .processAfterLoop
+.endInst:
+	ld a, AUD4ENVF_DIR
+	ldh [rAUD4ENV], a
+	ld a, AUD4GO_RESTART
+	ldh [rAUD4GO], a
+	ld hl, wCH4Flags
+	set CHB_NOTE_NOT_PLAYING, [hl]
+.end:
+
+carillonTickSound_updateOrder:
+	ld hl, wMusicFlags
+	ld a, [hli]
+	or a
+	ret nz
+
+	assert wMusicFlags + 1 == wMusicSpeed
+	ld a, [hli]
+	assert wMusicSpeed + 1 == wRowTicksLeft
+	dec [hl]
+	; Check if it's time to read a new row
+	; If the tick timer == 0, read new row
+	; if the tick timer != 0 && the tick timer == A / 2, read row
+	; This essentially divides the row speed by two, alternating between A >> 1 and (A >> 1) + (A & 1) ticks per row
+	jr z, .readNextRow
+		sra a
+		cp [hl]
+		ret nz
+		jr .skipSpeedReload
+.readNextRow
+	; Reload speed
+	ld [hl], a
+.skipSpeedReload:
+	assert wRowTicksLeft + 1 == wCurRow
+	inc l
+	xor a
+	or [hl]
+	jr nz, .notFirstRow
+		; If first row, increment order counter (preinc)
+		assert wCurRow + 2 == wCurOrder
+		inc l
+		inc l
+		inc [hl]
+		ld e, [hl]
+		ld d, HIGH(orderTable)
+.readOrderIndex:
+		ld a, [de]
+		or a
+		jr nz, .isPattern
+		; 0 == Loop point, Index is in next byte
+		inc e
+		ld a, [de]
+		cpl
+		or a
+		jr nz, .isLoop
+			; If Loop point is FF, stop music playback
+			inc a
+			ld [wMusicFlags], a
+			ret
+.isLoop:
+		cpl
+		ld [hl], a
+		ld e, a
+		jr .readOrderIndex
+.isPattern:
+	assert wCurOrder - 1 == wCurPatt
+	dec l
+	ld [hld], a
+	assert wCurPatt - 1 == wCurRow
+.notFirstRow:
+	ld d, HIGH(wCarillonWRAM)
+
+	; wCurPatt << 8 | wCurRow works as a pointer! Wow!
+	ld a, [hli]
+	ld h, [hl]
+	ld l, a
+
+FOR CH, 1, 4
+carillonTickSound_readRowCH{u:CH}:
+IF CH != 1
+	inc l
+ENDC
+	ld a, [hli]
+	or a
+	jr z, .noNote
+IF CH == 3
+	; Check if the note is a sample
+	cp $FF
+	jr z, readCH3Sample
+ENDC
+	; If note is tied, only change the note pitch without retriggering the instrument
+	ld e, LOW(wCH{u:CH}Note)
+	bit NOTEB_TIED, a
+	jr z, .triggerInst
+		and LOW(~NOTEF_TIED)
+		ld [de], a
+		jr .noNote
+.triggerInst:
+	ld [de], a
+	ld a, [hl]
+	assert wCH{u:CH}Note - 1 == wCH{u:CH}InstPtr
+	dec e
+	ld [de], a
+IF CH == 3
+	assert wCH{u:CH}InstPtr - 1 == wCH{u:CH}Wave
+	dec e
+	ld a, LOW(~$01)
+	ld [de], a
+	assert wCH{u:CH}Wave - 1 == wCH{u:CH}TicksLeft
+	dec e
+	cpl
+	ld [de], a
+	xor a
+	ld [wSampleBlocksLeft], a
+ELSE
+	assert wCH{u:CH}InstPtr - 1 == wCH{u:CH}TicksLeft
+	dec e
+	ld a, $01
+	ld [de], a
+ENDC
+	assert wCH{u:CH}TicksLeft - 1 == wCH{u:CH}Flags
+	; Clear not-playing flag
+	dec e
+	ld a, [de]
+IF CH == 3
+	and LOW(~(CHF_NOTE_NOT_PLAYING | CHF_RESERVED_SMP))
+ELSE
+	and LOW(~CHF_NOTE_NOT_PLAYING)
+ENDC
+	ld [de], a
+.noNote:
+ENDR
+; Outside of loop cus it's slightly different
+carillonTickSound_readRowCH4:
+	inc l
+	ld a, [hli]
+	or a
+	jr z, .noNote
+		; Lowest bits are NZ to pass Z test, but are not needed
+		and LOW(~NOTEF_TIED)
+		ld e, LOW(wCH4InstPtr)
+		ld [de], a
+		assert wCH4InstPtr - 1 == wCH4TicksLeft
+		dec e
+		ld a, $01
+		ld [de], a
+		assert wCH4TicksLeft - 1 == wCH4Flags
+		dec e
+		ld a, [de]
+		and LOW(~CHF_NOTE_NOT_PLAYING)
+		ld [de], a
+.noNote:
+carillonTickSound_readFX:
+	; No matter what effect path is taken, outside of modulation 
+	; related fx... modulation gets cleared, which makes little sense
+	ld a, [hli]
+	ld b, a
+	ld e, LOW(wCurRow)
+	ld a, l
+	ld [de], a
+	ld a, b
+	or a
+	jr z, .noFX
+		; Jump to effect based on higher four bits of A
+		swap a
+		and $0F
+		add a
+		add LOW(effectJumpTable)
+		ld h, HIGH(effectJumpTable)
+		ld l, a
+		ld a, [hli]
+		ld h, [hl]
+		ld l, a
+		jp hl
+.noFX:
+	ld [wModFlags], a
+	ret
+
+readCH3Sample:
+	ld e, LOW(wTrigCount)
+	; Since this is executed one tick before the instruments for this row 
+	; play, this delays sample playback by one music tick to better sync with the music
+	ld a, SAMPLE_TICKS_PER_FRAME + 1
+	ld [de], a
+	ld a, [hl]
+	add LOW(instPanTable.smp)
+	ld c, a
+	ld b, HIGH(instPanTable.smp)
+	ld a, [bc]
+REPT 3 - 1
+	add a
+ENDR
+	assert wTrigCount + 1 == wNewPanMask
+	inc e
+	ld [de], a
+	ld a, [hl]
+	add a
+	add LOW(sampleInfoTable)
+	ld b, HIGH(sampleInfoTable)
+	ld c, a
+	assert wNewPanMask + 1 == wNewSample
+	inc e
+	xor a
+	ld [de], a
+	inc e
+	ld a, [bc]
+	ld [de], a
+	inc c
+	assert wNewSample + 2 == wNewSampleBlocksLeft
+	inc e
+	ld a, [bc]
+	ld [de], a
+	jr carillonTickSound_readRowCH4
+
+setVibWidth:
+	ld a, b
+	and $07
+	add a
+	swap a
+	ld hl, wVibSize
+	ld [hld], a
+	assert wVibSize - 1 == wModFlags
+	xor a
+	ld [hl], a
+	ret
+
+setVibRate:
+	ld a, b
+	and $0F
+	ld [wVibSpeed], a
+	xor a
+	ld [wModFlags], a
+	ret
+
+initSlideUp:
+	ld a, b
+	and $0F
+	ld hl, wModAddLow
+	ld [hli], a
+	xor a
+	assert wModAddLow + 1 == wModLow
+	ld [hli], a
+	assert wModLow + 1 == wModAddHigh
+	ld [hli], a
+	assert wModAddHigh + 1 == wModHigh
+	ld [hl], a
+	ld [wModFlags], a
+	ret
+
+initSlideDown:
+	ld a, b
+	and $0F
+	cpl
+	ld hl, wModAddLow
+	ld [hli], a
+	xor a
+	ld [wModFlags], a
+	assert wModAddLow + 1 == wModLow
+	ld [hli], a
+	assert wModLow + 2 == wModHigh
+	inc l
+	ld [hld], a
+	assert wModHigh - 1 == wModAddHigh
+	ld [hl], HIGH(-1)
+	ret
+
+setTempo:
+	ld a, b
+	and $0F
+	ld hl, wMusicSpeed
+	ld [hli], a
+	ld [hl], a
+	xor a
+	ld [wModFlags], a
+	ret
+
+patternBreak:
+	xor a
+	ld [wCurRow], a
+	ld [wModFlags], a
+	ret
+
+modChannel:
+	ld a, b
+	and $0F
+	ld [wModFlags], a
+	ret
+
+slideChannel:
+	ld a, b
+	and $0F
+	or MOD_TYPE_SLIDE
+	ld [wModFlags], a
+knownRet:
+	ret
+
+ds align[8]
+freqTable:
+	; Taken from https://github.com/DevEd2/DevSoundX/blob/main/Audio/DevSoundX.asm#L1858 due to
+	; It's pretty formatting, thank you DevEd <3
+	;   C-x   C#x   D-x   D#x   E-x   F-x   F#x   G-x   G#x   A-x   A#x   B-x
+	dw $02C, $09D, $107, $16B, $1C9, $223, $277, $2C7, $312, $358, $39B, $3DA ; Octave 1
+	dw $02C, $09D, $107, $16B, $1C9, $223, $277, $2C7, $312, $358, $39B, $3DA ; Octave 1... again?
+	dw $416, $44E, $483, $4B5, $4E5, $511, $53B, $563, $589, $5AC, $5CE, $5ED ; Octave 2
+	dw $60B, $627, $642, $65B, $672, $689, $69E, $6B2, $6C4, $6D6, $6E7, $6F7 ; Octave 3
+	dw $706, $714, $721, $72D, $739, $744, $74F, $759, $762, $76B, $773, $77B ; Octave 4
+	dw $783, $78A, $790, $797, $79D, $7A2, $7A7, $7AC, $7B1, $7B6, $7BA, $7BE ; Octave 5
+	dw $7C1, $7C5, $7C8, $7CB, $7CE, $7D1, $7D4, $7D6, $7D9, $7DB, $7DD, $7DF ; Octave 6
+	dw $7C1, $7C5, $7C8, $7CB, $7CE, $7D1, $7D4, $7D6, $7D9, $7DB, $7DD, $7DF ; Octave 6... again??
+
+ds align[5]
+; List of words, high byte is HIGH(SampleAddr) and low byte is length in chunks
+sampleInfoTable:
+	loadSampleInfo
+
+ds align[5]
+effectJumpTable:
+	; ---
+	dw knownRet
+	; Mxx
+	dw modChannel
+	; SLx
+	dw slideChannel
+	; VWx
+	dw setVibWidth
+	; VRx
+	dw setVibRate
+	; UPx
+	dw initSlideUp
+	; DNx
+	dw initSlideDown
+	; TMx
+	dw setTempo
+	; BRx
+	dw patternBreak
+	; Padded with KnownRet entries... possibly for forwards compatibility?
+REPT 16 - (8 + 1)
+	dw knownRet
+ENDR
+
+ds align[8]
+vibratoTable:
+; TODO: Find out if the vibrato depth is some numeric formula, for now it's a constant
+MACRO genVibratoWave ; Depth
+	FOR X, 32
+		; For some reason, the vibrato depth is incremented by 1 for the second 
+		; half of the sine, so the vibrato always skews harder into the negatives than into the positives
+		db (SIN(DIV(X, 32)) * \1 * ((X > 15) + 1)) >> 16
+	ENDR
+ENDM
+	genVibratoWave $02
+	genVibratoWave $03
+	genVibratoWave $06
+	genVibratoWave $0A
+	genVibratoWave $0F
+	genVibratoWave $14
+
+; 2D array of each instrument's panning, first 16 are for Pulse instruments, 
+; then Wave instruments, noise instruments and samples
+ds align[6]
+instPanTable:
+	loadPanTable
+
+; Array of each instrument row's length and volume, higher nibble is volume and lower nibble is tick length
+ds align[8]
+instPulseVolLen:
+	loadPulseVolLen
+
+; Upper 6 bits are note index (0-63), lower two bits are duty (0-3).
+ds align[8]
+instPulseNoteDuty:
+	loadPulseNoteDuty
+
+; Upper nibble is waveform, lower nibble is the tick length
+ds align[8]
+instWaveIndexLen:
+	loadWaveIndexLen
+
+; Upper 6 bits are note index (0-63), lower two bits are volume (0-3) in rAUD3LEVEL format.
+ds align[8]
+instWaveNoteVol:
+	loadWaveNoteVol
+
+; 16 WAVERAM entries
+ds align[8]
+waveTable:
+	loadWavetable
+
+; Same as PulseVolLen
+ds align[8]
+instNoiseVolLen:
+	loadNoiseVolLen
+
+; Array of rAUD4POLY values for each inst
+ds align[8]
+instNoiseFreq:
+	loadNoiseFreq
+
+; HIGH(pattern[n]), 255 slots, an extra slot is reserved for defining loops
+ds align[8]
+orderTable:
+	loadOrderTable
+
+; Finally put pattern data here
+loadPatternData

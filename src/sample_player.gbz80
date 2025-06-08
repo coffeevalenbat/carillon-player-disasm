@@ -1,0 +1,85 @@
+; Carillon player sample code
+include "hardware.inc"
+include "carillon.inc"
+
+SECTION "Sample Player code", ROMX
+Player_SampleUpdate::
+carillonUpdateSample::
+	xor a
+	ld hl, wTrigCount
+	or [hl]
+	jr z, .samplePlaying
+
+	; If waiting for a sample to start
+	xor a
+	dec [hl]
+	jr nz, .samplePlaying	
+		assert wTrigCount + 1 == wNewPanMask
+		inc l
+		ldh a, [rAUDTERM]
+		and LOW(~(AUDTERM_3_LEFT | AUDTERM_3_RIGHT))
+		or [hl]
+		ldh [rAUDTERM], a
+		assert wNewPanMask + 1 == wNewSample
+		inc l
+		ld d, h
+		ld e, LOW(wSampleAddr)
+		ld a, [hli]
+		ld [de], a
+		inc e
+		ld a, [hli]
+		ld [de], a
+		assert wSampleAddr + 2 == wSampleBlocksLeft
+		inc e
+		ld a, [hli]
+		ld [de], a
+		ld e, LOW(wCH3Flags)
+		ld a, [de]
+		or CHF_NOTE_NOT_PLAYING | CHF_RESERVED_SMP
+		ld [de], a
+		ld a, LOW(SAMPLE_CH3_FREQ)
+		ldh [rAUD3LOW], a
+		ld a, AUD3LEVEL_100
+		ldh [rAUD3LEVEL], a
+		ld l, LOW(wSampleAddr + 1)
+		jr .loadSampleData
+.samplePlaying:
+	; If no sample blocks are left, return
+	assert wTrigCount - 1 == wSampleBlocksLeft
+	dec l
+	or [hl]
+	ret z
+
+	; If we processed the last block last call, mute channel
+	dec [hl]
+	jr z, .finishSample
+	assert wSampleBlocksLeft - 1 == (wSampleAddr + 1)
+	dec l
+.loadSampleData:
+	ld a, [hld]
+	ld l, [hl]
+	ld h, a
+	xor a
+	ldh [rAUD3ENA], a
+	FOR N, AUD3WAVE_SIZE
+		ld a, [hli]
+		ldh [rAUD3WAVE_{X:N}], a
+	ENDR
+	ld a, AUD3ENA_ON
+	ldh [rAUD3ENA], a
+	ld a, HIGH(SAMPLE_CH3_FREQ) | AUD3GO_RESTART
+	ldh [rAUD3GO], a
+	ld a, l
+	ld [wSampleAddr], a
+	ld a, h
+	ld [wSampleAddr + 1], a
+	ret
+.finishSample:
+	xor a
+	ldh [rAUD3LEVEL], a
+	ld hl, wCH3Flags
+	res CHB_RESERVED_SMP, [hl]
+	ret
+
+sampleData::
+	loadSampleData
