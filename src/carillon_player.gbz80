@@ -307,9 +307,12 @@ songOrderOffsets:
 ; Song 7 - Starting at $e0
 	db LOW($E0 - 1)
 
-; Pad table
-	ds align[8]
-
+; Weirdly enough the update routine is aligned..?
+; Possibly done to allow room for updates without forwarding calls to the jump table
+ds align[8]
+;; This must be called once every frame to keep the music playing. (After all your VBlank routines is usually fine.)
+;; The routine takes only 0 - 3 LCD lines of raster time (Less than 2% CPU usage).
+; @destroy af bc de hl
 Player_MusicUpdate::
 carillonTickSound::
 	xor a
