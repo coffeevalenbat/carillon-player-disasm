@@ -1,8 +1,9 @@
 # Carillon Player
-This is a dissasembly of [Aleksi Eeben](https://aleksieeben.wordpress.com/)'s Carillon Player, a Game Boy music engine focused on speed (0-3 Scanlines on CGB max).
-This dissasembly is based on what I believe is the latest version of Carillon Player, using a mix of the included example ROMs and the playback code present in Carillon Editor v1.2. This repository is supposed to work less as a 100% matching dissasembly of Carillon and more as a documentation of the format and an easy to use/understand version of the source code.
+This is a dissasembly of [Aleksi Eeben](https://aleksieeben.wordpress.com/)'s Carillon Player, a Game Boy music engine focused on speed (0-3 Scanlines on CGB max). This dissasembly is based on what I believe is the latest version of Carillon Player, using a mix of the included example ROMs and the playback code present in Carillon Editor v1.2.
 
-Right now this repository is still very WIP!
+This repository is supposed to work less as a 100% matching dissasembly of Carillon and more as a documentation of the format and an easy to use/understand version of the source code, hopefully allowing for easier implementation in Homebrew.
+
+**Right now this repository is still very WIP!**
 
 # Format
 For info on the Carillon Player format, see inside [docs](docs/).
