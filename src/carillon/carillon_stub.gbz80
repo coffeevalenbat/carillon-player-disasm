@@ -1,0 +1,14 @@
+; Boilerplate to build Carillon with music and sample player
+include "carillon.inc"
+
+; Include music data
+IF DEF(_CARILLON_MODULE)
+	include #_CARILLON_MODULE
+ENDC
+
+; And player
+include "src/carillon/carillon_player.gbz80"
+; And sample player if needed
+IF DEF(_CARILLON_SAMPLE_PLAYBACK)
+	include "src/carillon/sample_player.gbz80"
+ENDC

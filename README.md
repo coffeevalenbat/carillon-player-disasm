@@ -6,7 +6,7 @@ This repository is supposed to work less as a 100% matching dissasembly of Caril
 **Right now this repository is still very WIP!**
 
 # Format
-For info on the Carillon Player format, see inside [docs](docs/).
+For info on the Carillon Player format, see inside [docs](docs/carillon-format.md).
 
 # Compiling
 Simply open you favorite command prompt / terminal, place yourself in this directory (the one the Makefile is located in), and run the command `make`.
@@ -22,20 +22,24 @@ If that gives the same error, try deleting the `assets` directory.
 If that still doesn't work, try deleting the `bin` and `obj` directories as well.
 If that still doesn't work, feel free to ask for help.
 
-# Usage
-TODO
+# External Usage
+Right now the code is still early on enough that external implementation is not 100% done yet, but for the brave...
+
+To add a Carillon music/sample bank to your program, simply `include` the `carillon_stub.gbz80` file in your RGBDS project, and don't forget to pass the variable `_CARILLON_MODULE` with the path to your project file. This repository contains an example ROM that loads a module from a SAV file. If you're using a build system like Make, make (hehe) sure that none of the files inside the `carillon` folder get picked up as a source, this can be achieved through different ways, but this repo achieves it by using the `.asm` extension for source assembly files and the `.gbz80` extension for files that should be scanned.
+
+Right now due to the structure of the driver, it's not possible to embed multiple copies of Carillon+Music+Samples on a single project. This is something I wanna support in the future but I need a proper structure that doesn't create colliding labels. Any ideas are welcome!
+
+The driver also utilizes [Debugfiles](https://github.com/ISSOtm/debugfile.inc/wiki) to allow for clearer debugging of the driver. To enable extensive logging, define `_CARILLON_LOG`. These debug info and assertions are currently supported by [Emulicious](https://emulicious.net/).
 
 # TODO
-- Debugfile implementation
-- Explain converter's shortcomings (Ghost bytes, Weird sample length)
-- Clean up variable names and comments in player code
-- Port documentation from HTML to MD
+- Port documentation from Carillon's release from HTML to MD
+- Modern alternative of Carillon Editor Utility?
 - New example ROM?
-- Proper GBDK Support?
+- ROM0+ROMX version (Allowing for proper GBDK support)?
 
 # Credits
 - [Aleksi Eeben](https://aleksieeben.wordpress.com/): Original author of Carillon Player
 - [Coffee 'Valen' Bat](https://x.com/Cofebbat): Tools and Dissasembly
-- [ISSOtm](https://eldred.fr/): Author of gb-boilerplate, used as a template for this repo.
+- [ISSOtm](https://eldred.fr/): Author of gb-boilerplate, used as a template for this repo, and [debugfile.inc](https://github.com/ISSOtm/debugfile.inc), used for versatile debugging.
 
 This project uses the [gb-boilerplate](https://github.com/ISSOtm/gb-boilerplate) template by ISSOtm, under the zlib license.

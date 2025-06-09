@@ -5,11 +5,9 @@
 ;		HB Hub says December 2000 but Aleksi's page for Carillon has snapshots 
 ;		from October 2000 https://web.archive.org/web/20001027202442/http://www.student.oulu.fi/~aeeben/carillon.html 
 ;		Filedate for example ROMs are from January 2001.
-; TODO: Clean up symbol naming a bit
-; TODO: Debugfile support
-; TODO: Fix "Where to put WRAM def" caveat
 
 include "carillon.inc"
+include "debugfile.inc"
 
 SECTION "Carillon Player WRAM", WRAM0, align[6]
 ; Variable info taken from using_carillon.html
@@ -25,91 +23,96 @@ wMusicFlags: db
 wMusicSpeed: db
 
 ; Step time counter
-; Starts at value in Speed, decremented by one every frame. One step is advanced when StepP = Speed/2 or StepP = $00.
+; Starts at value in Speed, decremented by one every tick. One row is advanced when wRowTicksLeft = Speed/2 or wRowTicksLeft = $00.
 wRowTicksLeft: db
 
-; Current step (n *$08)
+; Low byte of current pattern (row * $08)
 wCurRow: db
 
-; Current block (block number + $50)
+; High byte of current pattern
 wCurPatt: db
 
-; Current position in Block Order List
-; In Player_MusicSelect SequencerP is set to (actual song starting position - 1) and PatternP is set to $00.
+; Current position in Pattern Order List
+; In carillonSelectSong	wCurOrder is set to (actual song starting position - 1) and wCurRow is set to $00.
 wCurOrder: db
 
 FOR CH, 1, 5
-; Bit 2: (Only CH3) Ch3 reserved for playing a sample trigged in music data (1 = yes, 0 = no)
-; Bit 1: ChX reserved for sound FX routines (1 = yes, 0 = no)
-; Bit 0: ChX music note playing (1 = no, 0 = yes)
-; When ChXFlags is not $00, no instrument sound data is read and all ChX sound registers (rNRXy) remain intact.
+; 76543210
+;      ||+- If set, channel is reading data for instrument, if not set, channel finished reading instrument data.
+;      |+-- If set, channel is reserved for SFX playback, set to 1 if plugging an SFX engine.
+;      +--- (Only CH3) If set, Channel is playing back sample data.
+; When wCHnFlags is not $00, no instrument sound data is read and all CHn sound registers (rNRXy) remain intact.
 	wCH{u:CH}Flags:: db
 
-; Countdown (in frames) before moving to next step in sound data
+; Countdown (in ticks) before moving to next step in sound data
 	wCH{u:CH}TicksLeft: db
 
 IF CH == 3
-; Current Waveform (n * $10) in Waveform RAM
+; Current Waveform (n * $10) in Waveform RAM, set to any value where the lower nibble is NZ to request a wave reload.
 	wCH{u:CH}Wave: db
 ENDC
 
-; High nybble: ChX Sound number
-; Low nybble: Current step in sound data
+; High nybble: CHn Sound number
+; Low nybble: Current row in subpattern
 	wCH{u:CH}InstPtr: db
 
 IF CH != 4
-; Current ChX Note (before arpeggiato)
+; Base CHn Note set in pattern
 	wCH{u:CH}Note: db
 
-; ChX Frequency (before modulation/slide)
+; CHn Frequency (before modulation/slide)
 	wCH{u:CH}Freq: dw
 ENDC
 ENDR
 
-; Internally set when Waveform RAM is reloaded
+; Cleared at the start of the update routine, set to AUD3GO_RESTART to retrigger the channel when changing waves
 wCH3Init: db
 	
-; Bit 7: Vibrato/Slide
-; Bit 2: Modulate Ch3
-; Bit 1: Modulate Ch2
-; Bit 0: Modulate Ch1
+; 76543210
+;     |||+- If set, apply modulation to Channel 1
+;     ||+-- If set, apply modulation to Channel 2
+;     |+--- If set, apply modulation to Channel 3
+;     +---- If set, frequency slide modulation is calculated, if not set, a vibrato is calculated
 wModFlags: db
 
-; Vibrato Phase (and Width)
-wVibSize: db
+; Vibrato Depth, index into 32-byte table for each depth
+; 76543210
+; |||+++++- Current vibrato modulo
+; +++------ Vibrato depth (0-5)
+wVibDepth: db
 
-; Vibrato Speed
+; Vibrato Speed, added to `wVibDepth` on every modulated tick
 wVibSpeed: db
 	
-; Slide Add Low-order byte
+; Modulation offset low byte
 wModAddLow: db
 
-; Current Slide Amount Low-order byte
+; Accumulated modulation low byte
 wModLow: db
 
-; Slide Add High-order byte
+; Modulation offset high byte
 wModAddHigh: db
 
-; Current Slide Amount High-order byte
+; Accumulated modulation high byte
 wModHigh: db
 
-; Sample Address word
+; Active Sample Data Addess
 wSampleAddr: dw
 
 ; Sample blocks left to play
+; "Block" means 16-byte WAVERAM chunk
 wSampleBlocksLeft: db
 
-; "Used for timing"
-; Ticks down how many calls to `Player_SampleUpdate` to wait before feeding sample data.
+; Ticks down how many calls to `Player_SampleUpdate` to wait before feeding sample data to better syncronize sample playback with music
 wTrigCount: db
 
-; Pan position for trigged sample
+; Copied to rAUDTERM once wTrigCount reaches zero
 wNewPanMask: db
 
 ; "Temporary storage for trigging sample"
 ; Copied over to wSampleAddr once wTrigCount reaches zero, Possibly handled like this to avoid 
 ; corruption if a sample was read midway through triggering a new sample
-wNewSample: dw
+wNewSampleAddr: dw
 
 ; Sample blocks left to play
 wNewSampleBlocksLeft: db
@@ -119,29 +122,18 @@ wNewSampleBlocksLeft: db
 ; FX Hammer: Priority of current Sound FX playing ($00 = lowest)
 wFXCurrentPriority:: db
 
-; FX Hammer: Countdown (in frames) before moving to next step in Sound FX
+; FX Hammer: Countdown (in ticks) before moving to next step in Sound FX
 wFXTicksLeft:: db
 
-; FX Hammer: Current Step
+; FX Hammer: Low byte of current SFX (row)
 wFXCurRow:: db
 
-; FX Hammer: Current Sound FX (FX number + $44)
+; FX Hammer: High byte of current SFX
 wFXIndex:: db
 
 wCarillonWRAM.end::
 
-DEF _CRLN_ROM	EQUS "ROMX"
-
-IF DEF(MATCH_BASEROM)
-	; Use original hardcoded addresses
-	IF DEF(_CRLN_USE_SAMPLE_PLAYER)
-		REDEF _CRLN_ROM 	EQUS "ROMX[_ROMBANK], BANK[2]"
-	ELSE
-		REDEF _CRLN_ROM 	EQUS "ROMX[_ROMBANK], BANK[1]"
-	ENDC
-ENDC
-
-SECTION "Carillon Player Code", _CRLN_ROM
+SECTION "Carillon Player Code", ROMX
 ; Jump table
 Player_Initialize::
 	jp carillonInit
@@ -170,6 +162,7 @@ carillonThumb:
 ;; sound circuits (by writing $00 to rNR52) for example during pause mode.
 ; @destroy af c hl
 carillonInit::
+	carillon_log "Initializing Carillon Player..."
 	; Enable and clear APU
 	ld a, AUDENA_ON
 	ldh [rAUDENA], a
@@ -210,6 +203,7 @@ carillonInit::
 ;; Starts playing song number 0. Call carillonSelectSong right after this call to select another song.
 ; @destroy af hl
 carillonPlaySong::
+	carillon_log "Starting Carillon Song (Always Song #0)"
 	ld hl, wMusicFlags
 	xor a
 	ld [hli], a
@@ -269,6 +263,7 @@ ENDR
 ;; Note: Calling this routine is not necessary when switching to a different song or Music Bank.
 ; @destroy af hl
 carillonStopSong::
+	carillon_log "Stopping Carillon Music Playback"
 	ld hl, wMusicFlags
 	ld a, MUSICF_STOPPED
 	ld [hl], a
@@ -279,8 +274,11 @@ carillonStopSong::
 ; @param a: Index of song to select (0-7).
 ; @destroy af hl
 carillonSelectSong::
+	carillon_log "Selecting Carillon Song #\{a\}"
+	runtime_assert a < {u:NUM_SONGS}, "Attempting to load song index outside song table!"
 	ld hl, songOrderOffsets
 	add l
+	runtime_assert cf == 0, "Overflowed outside song table!"
 	ld l, a
 	ld a, [hl]
 	ld [wCurOrder], a
@@ -325,9 +323,10 @@ carillonTickSound::
 		bit MODB_TYPE, a
 		jr nz, .modSlide
 	.modVibrato:
-		assert wModFlags + 1 == wVibSize
+		assert wModFlags + 1 == wVibDepth
 		ld a, [hli]
-		assert wVibSize + 1 == wVibSpeed
+		assert wVibDepth + 1 == wVibSpeed
+		; Add modulo speed and akwardly restore speed to avoid overflow
 		add [hl]
 		and $1F
 		dec l
@@ -338,6 +337,7 @@ carillonTickSound::
 		ld [hl], a
 		ld l, a
 		ld h, HIGH(vibratoTable)
+		runtime_assert (hl < vibratoTable.end) && (hl >= vibratoTable), "Vibrato modulation is reading outside table!"
 		ld a, [hl]
 		ld [wModLow], a
 		; Sign extend modulo
@@ -366,6 +366,7 @@ carillonTickSound::
 carillonTickSound_updateInstCH1:
 	ld hl, wCH1Flags
 	ld a, [hli]
+	runtime_assert a & (~({u:CHF_NOTE_NOT_PLAYING} | {u:CHF_RESERVED_FX})) == $00, "Invalid flags set in wCH1Flags!"
 	or a
 	jp nz, .end
 	; Tick down row timer
@@ -379,14 +380,16 @@ carillonTickSound_updateInstCH1:
 	and $0F
 	or a ; Not necessary
 	jr nz, .notFirstRow
-		; First row of inst data
+		; First row of inst data, set panning
 		ld a, l
 		swap a
 		and $0F
-		add LOW(instPanTable.ch1)
+		add LOW(instPanTable.pulse)
 		ld c, a
-		ld b, HIGH(instPanTable.ch1)
+		ld b, HIGH(instPanTable.pulse)
 		ld a, [bc]
+		runtime_assert a & (~$11) == $00, "Invalid panning value in CH1!"
+		dbg_action "message \"Warning: Panning value for CH1 is $00, doesn't seem right...\"", @a == $00
 		ld b, a
 		ldh a, [rAUDTERM]
 		and LOW(~($11 << (1 - 1)))
@@ -404,6 +407,7 @@ carillonTickSound_updateInstCH1:
 	ldh [rAUD1ENV], a
 	ld a, b
 	and $0F
+	runtime_assert a != $00, "Invalid subpattern row length! Length shouldn't be zero here!"
 
 	assert wCH1InstPtr - 1 == wCH1TicksLeft
 	dec e
@@ -412,12 +416,13 @@ carillonTickSound_updateInstCH1:
 	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
 	inc h
 	ld a, [hli]
+	; Sign extend note value and push duty to B register
 	sra a
 	rr b
 	sra a
 	rr b
 	add a
-	; H = Note index * 2
+	; H = Relative Note index * 2
 	ld h, a
 	; A = Pulse for row
 	ld a, b
@@ -428,11 +433,13 @@ carillonTickSound_updateInstCH1:
 	; Write back to instptr
 	ld [de], a
 	ld b, HIGH(freqTable)
+	; Add relative note to base note
 	assert wCH1InstPtr + 1 == wCH1Note
 	inc e
 	ld a, [de]
 	add h
 	ld c, a
+	runtime_assert (bc < freqTable.end) && (bc >= freqTable), "Fetching frequency for CH1 outside frequency table!"
 	ld a, [wModFlags]
 	bit MODB_CH1, a
 	jr nz, .applyMod
@@ -483,6 +490,7 @@ carillonTickSound_updateInstCH1:
 	dec h
 	jr .processAfterLoop
 .endInst:
+	; Set volume to 0 and trigger
 	ld a, AUD1ENVF_DIR
 	ldh [rAUD1ENV], a
 	ld a, AUD1GO_RESTART
@@ -510,6 +518,7 @@ carillonTickSound_updateInstCH1:
 carillonTickSound_updateInstCH2:
 	ld hl, wCH2Flags
 	ld a, [hli]
+	runtime_assert a & (~({u:CHF_NOTE_NOT_PLAYING} | {u:CHF_RESERVED_FX})) == $00, "Invalid flags set in wCH2Flags!"
 	or a
 	jp nz, .end
 	; Tick down row timer
@@ -523,14 +532,16 @@ carillonTickSound_updateInstCH2:
 	and $0F
 	or a ; Not necessary
 	jr nz, .notFirstRow
-		; First row of inst data
+		; First row of inst data, set panning
 		ld a, l
 		swap a
 		and $0F
-		add LOW(instPanTable.ch2)
+		add LOW(instPanTable.pulse)
 		ld c, a
-		ld b, HIGH(instPanTable.ch2)
+		ld b, HIGH(instPanTable.pulse)
 		ld a, [bc]
+		runtime_assert a & (~$11) == $00, "Invalid panning value in CH2!"
+		dbg_action "message \"Warning: Panning value for CH2 is $00, doesn't seem right...\"", @a == $00
 		; Shift left to align with AUDTERM
 		add a
 		ld b, a
@@ -550,6 +561,7 @@ carillonTickSound_updateInstCH2:
 	ldh [rAUD2ENV], a
 	ld a, b
 	and $0F
+	runtime_assert a != $00, "Invalid subpattern row length! Length shouldn't be zero here!"
 
 	assert wCH2InstPtr - 1 == wCH2TicksLeft
 	dec e
@@ -558,12 +570,13 @@ carillonTickSound_updateInstCH2:
 	assert HIGH(instPulseVolLen) + 1 == HIGH(instPulseNoteDuty)
 	inc h
 	ld a, [hli]
+	; Sign extend note value and push duty to B register
 	sra a
 	rr b
 	sra a
 	rr b
 	add a
-	; H = Note index * 2
+	; H = Relative Note index * 2
 	ld h, a
 	; A = Pulse for row
 	ld a, b
@@ -574,11 +587,13 @@ carillonTickSound_updateInstCH2:
 	; Write back to instptr
 	ld [de], a
 	ld b, HIGH(freqTable)
+	; Add relative note to base note
 	assert wCH2InstPtr + 1 == wCH2Note
 	inc e
 	ld a, [de]
 	add h
 	ld c, a
+	runtime_assert (bc < freqTable.end) && (bc >= freqTable), "Fetching frequency for CH2 outside frequency table!"
 	ld a, [wModFlags]
 	bit MODB_CH2, a
 	jr nz, .applyMod
@@ -629,6 +644,7 @@ carillonTickSound_updateInstCH2:
 	dec h
 	jr .processAfterLoop
 .endInst:
+	; Set volume to 0 and trigger
 	ld a, AUD2ENVF_DIR
 	ldh [rAUD2ENV], a
 	ld a, AUD2GO_RESTART
@@ -657,6 +673,7 @@ carillonTickSound_updateInst3:
 	ld hl, wCH3Flags
 	ld a, [hli]
 	or a
+	runtime_assert a & (~({u:CHF_NOTE_NOT_PLAYING} | {u:CHF_RESERVED_FX} | {u:CHF_RESERVED_SMP})) == $00, "Invalid flags set in wCH3Flags!"
 	jp nz, .end
 	; Tick down row timer
 	dec [hl]
@@ -669,14 +686,16 @@ carillonTickSound_updateInst3:
 	and $0F
 	or a ; Not necessary
 	jr nz, .notFirstRow
-		; First row of inst data
+		; First row of inst data, set panning
 		ld a, l
 		swap a
 		and $0F
-		add LOW(instPanTable.ch3)
+		add LOW(instPanTable.wave)
 		ld c, a
-		ld b, HIGH(instPanTable.ch3)
+		ld b, HIGH(instPanTable.wave)
 		ld a, [bc]
+		runtime_assert a & (~$11) == $00, "Invalid panning value in CH3!"
+		dbg_action "message \"Warning: Panning value for CH3 is $00, doesn't seem right...\"", @a == $00
 		; Shift left to align with AUDTERM
 		add a
 		add a
@@ -732,6 +751,7 @@ carillonTickSound_updateInst3:
 	xor a
 	ldh [rAUD3ENA], a
 	FOR N, AUD3WAVE_SIZE
+		runtime_assert (hl < waveTable.end) && (hl >= waveTable), "Fetching wavetable data outside table!"
 		IF N != (AUD3WAVE_SIZE - 1)
 			ld a, [hli]
 		ELSE
@@ -747,12 +767,14 @@ carillonTickSound_updateInst3:
 .noWaveReload:
 	ld a, b
 	and $0F
+	runtime_assert a != $00, "Invalid subpattern row length! Length shouldn't be zero here!"
 	ld e, LOW(wCH3TicksLeft)
 	ld [de], a
+
 	assert HIGH(instWaveIndexLen) + 1 == HIGH(instWaveNoteVol)
 	inc h
 	ld a, [hli]
-	; Rip out volume and note index
+	; Sign extend note value and push volume to B register
 	sra a
 	rr b
 	sra a
@@ -761,7 +783,7 @@ carillonTickSound_updateInst3:
 	sra b
 	ld h, a
 	ld a, b
-	and AUD3LEVELF_VOLUME
+	and AUD3LEVELF_VOLUME ; Not necesarry
 	ldh [rAUD3LEVEL], a
 	ld a, l
 	ld e, LOW(wCH3InstPtr)
@@ -773,6 +795,7 @@ carillonTickSound_updateInst3:
 	ld a, [de]
 	add h
 	ld c, a
+	runtime_assert (bc < freqTable.end) && (bc >= freqTable), "Fetching frequency for CH3 outside frequency table!"
 	ld a, [wModFlags]
 	bit MODB_CH3, a
 	jr nz, .applyMod
@@ -809,6 +832,7 @@ carillonTickSound_updateInst3:
 	ld l, LOW(wModHigh)
 	adc [hl]
 	assert CH3F_INIT == AUD3GO_RESTART
+	; wCH3Init works as an OR flag only set when a new wave was set
 	ld hl, wCH3Init
 	add [hl]
 	ldh [rAUD3GO], a
@@ -837,6 +861,7 @@ carillonTickSound_updateInst3:
 carillonTickSound_updateInstCH4:
 	ld hl, wCH4Flags
 	ld a, [hli]
+	runtime_assert a & (~({u:CHF_NOTE_NOT_PLAYING} | {u:CHF_RESERVED_FX})) == $00, "Invalid flags set in wCH4Flags!"
 	or a
 	jr nz, .end
 	; Tick down row timer
@@ -854,10 +879,12 @@ carillonTickSound_updateInstCH4:
 		ld a, l
 		swap a
 		and $0F
-		add LOW(instPanTable.ch4)
+		add LOW(instPanTable.noise)
 		ld c, a
-		ld b, HIGH(instPanTable.ch4)
+		ld b, HIGH(instPanTable.noise)
 		ld a, [bc]
+		runtime_assert a & (~$11) == $00, "Invalid panning value in CH4!"
+		dbg_action "message \"Warning: Panning value for CH4 is $00, doesn't seem right...\"", @a == $00
 		; Shift left to align with AUDTERM
 		add a
 		add a
@@ -879,6 +906,7 @@ carillonTickSound_updateInstCH4:
 	ldh [rAUD4ENV], a
 	ld a, b
 	and $0F
+	runtime_assert a != $00, "Invalid subpattern row length! Length shouldn't be zero here!"
 
 	assert wCH4InstPtr - 1 == wCH4TicksLeft
 	dec e
@@ -912,6 +940,7 @@ carillonTickSound_updateInstCH4:
 	dec h
 	jr .processAfterLoop
 .endInst:
+	; If finished, set volume to 0 and trigger
 	ld a, AUD4ENVF_DIR
 	ldh [rAUD4ENV], a
 	ld a, AUD4GO_RESTART
@@ -923,6 +952,7 @@ carillonTickSound_updateInstCH4:
 carillonTickSound_updateOrder:
 	ld hl, wMusicFlags
 	ld a, [hli]
+	runtime_assert a & ~({u:MUSICF_STOPPED}) == $00, "Invalid flags set on wMusicFlags!"
 	or a
 	ret nz
 
@@ -949,13 +979,15 @@ carillonTickSound_updateOrder:
 	or [hl]
 	jr nz, .notFirstRow
 		; If first row, increment order counter (preinc)
+		; And read next order
 		assert wCurRow + 2 == wCurOrder
 		inc l
 		inc l
 		inc [hl]
-		ld e, [hl]
+		ld e, [hl]		
 		ld d, HIGH(orderTable)
 .readOrderIndex:
+		carillon_log "Reading order index \{e\}"
 		ld a, [de]
 		or a
 		jr nz, .isPattern
@@ -965,16 +997,20 @@ carillonTickSound_updateOrder:
 		cpl
 		or a
 		jr nz, .isLoop
+			carillon_log "Song is over!"
 			; If Loop point is FF, stop music playback
 			inc a
 			ld [wMusicFlags], a
 			ret
 .isLoop:
 		cpl
+		carillon_log "Looping to index \{a\}"
 		ld [hl], a
 		ld e, a
 		jr .readOrderIndex
 .isPattern:
+	; TODO: Find way to print actual label rather than address of pattern?
+	carillon_log "Reading pattern at $\{(a << 8) | [wCurRow],4$\}"
 	assert wCurOrder - 1 == wCurPatt
 	dec l
 	ld [hld], a
@@ -986,6 +1022,7 @@ carillonTickSound_updateOrder:
 	ld a, [hli]
 	ld h, [hl]
 	ld l, a
+	runtime_assert (hl < patternData.end) && (hl >= patternData), "Reading pattern data outside section!"
 
 FOR CH, 1, 4
 carillonTickSound_readRowCH{u:CH}:
@@ -1008,6 +1045,7 @@ ENDC
 		ld [de], a
 		jr .noNote
 .triggerInst:
+	runtime_assert (a >> 1) < {u:UNR_NOTE}, "Invalid note!"
 	ld [de], a
 	ld a, [hl]
 	assert wCH{u:CH}Note - 1 == wCH{u:CH}InstPtr
@@ -1016,6 +1054,7 @@ ENDC
 IF CH == 3
 	assert wCH{u:CH}InstPtr - 1 == wCH{u:CH}Wave
 	dec e
+	; Prompts wave reload (Not really needed?) and sets up for complement after
 	ld a, LOW(~$01)
 	ld [de], a
 	assert wCH{u:CH}Wave - 1 == wCH{u:CH}TicksLeft
@@ -1027,6 +1066,7 @@ IF CH == 3
 ELSE
 	assert wCH{u:CH}InstPtr - 1 == wCH{u:CH}TicksLeft
 	dec e
+	; Timer of 1 means the next tick gets decreased and triggered
 	ld a, $01
 	ld [de], a
 ENDC
@@ -1072,6 +1112,7 @@ carillonTickSound_readFX:
 	ld [de], a
 	ld a, b
 	or a
+	; Technically this jump is not needed since the table already takes care of Effect 0, but it was prob done for speed.
 	jr z, .noFX
 		; Jump to effect based on higher four bits of A
 		swap a
@@ -1084,11 +1125,13 @@ carillonTickSound_readFX:
 		ld h, [hl]
 		ld l, a
 		jp hl
+
 .noFX:
 	ld [wModFlags], a
 	ret
 
 readCH3Sample:
+	carillon_log "Triggering sample #\{[hl]\}"
 	ld e, LOW(wTrigCount)
 	; Since this is executed one tick before the instruments for this row 
 	; play, this delays sample playback by one music tick to better sync with the music
@@ -1099,6 +1142,8 @@ readCH3Sample:
 	ld c, a
 	ld b, HIGH(instPanTable.smp)
 	ld a, [bc]
+	runtime_assert a & (~$11) == $00, "Invalid panning value in CH3!"
+	dbg_action "message \"Warning: Panning value for CH3 is $00, doesn't seem right...\"", @a == $00
 REPT 3 - 1
 	add a
 ENDR
@@ -1110,7 +1155,7 @@ ENDR
 	add LOW(sampleInfoTable)
 	ld b, HIGH(sampleInfoTable)
 	ld c, a
-	assert wNewPanMask + 1 == wNewSample
+	assert wNewPanMask + 1 == wNewSampleAddr
 	inc e
 	xor a
 	ld [de], a
@@ -1118,7 +1163,7 @@ ENDR
 	ld a, [bc]
 	ld [de], a
 	inc c
-	assert wNewSample + 2 == wNewSampleBlocksLeft
+	assert wNewSampleAddr + 2 == wNewSampleBlocksLeft
 	inc e
 	ld a, [bc]
 	ld [de], a
@@ -1129,9 +1174,9 @@ setVibWidth:
 	and $07
 	add a
 	swap a
-	ld hl, wVibSize
+	ld hl, wVibDepth
 	ld [hld], a
-	assert wVibSize - 1 == wModFlags
+	assert wVibDepth - 1 == wModFlags
 	xor a
 	ld [hl], a
 	ret
@@ -1219,6 +1264,7 @@ freqTable:
 	dw $783, $78A, $790, $797, $79D, $7A2, $7A7, $7AC, $7B1, $7B6, $7BA, $7BE ; Octave 5
 	dw $7C1, $7C5, $7C8, $7CB, $7CE, $7D1, $7D4, $7D6, $7D9, $7DB, $7DD, $7DF ; Octave 6
 	dw $7C1, $7C5, $7C8, $7CB, $7CE, $7D1, $7D4, $7D6, $7D9, $7DB, $7DD, $7DF ; Octave 6... again??
+.end
 
 ds align[5]
 ; List of words, high byte is HIGH(SampleAddr) and low byte is length in chunks
@@ -1252,20 +1298,14 @@ ENDR
 
 ds align[8]
 vibratoTable:
-; TODO: Find out if the vibrato depth is some numeric formula, for now it's a constant
-MACRO genVibratoWave ; Depth
+FOR VD, NUM_VIBRATO
 	FOR X, 32
 		; For some reason, the vibrato depth is incremented by 1 for the second 
 		; half of the sine, so the vibrato always skews harder into the negatives than into the positives
-		db (SIN(DIV(X, 32)) * \1 * ((X > 15) + 1)) >> 16
+		db (MUL(SIN(DIV(X, 32)), ROUND(MUL(SIN(DIV(VD - 4, 16)), 13.25) + 15.0)) * ((X > 15) + 1)) >> 16
 	ENDR
-ENDM
-	genVibratoWave $02
-	genVibratoWave $03
-	genVibratoWave $06
-	genVibratoWave $0A
-	genVibratoWave $0F
-	genVibratoWave $14
+ENDR
+.end
 
 ; 2D array of each instrument's panning, first 16 are for Pulse instruments, 
 ; then Wave instruments, noise instruments and samples
@@ -1297,6 +1337,7 @@ instWaveNoteVol:
 ds align[8]
 waveTable:
 	loadWavetable
+waveTable.end:
 
 ; Same as PulseVolLen
 ds align[8]
@@ -1314,4 +1355,6 @@ orderTable:
 	loadOrderTable
 
 ; Finally put pattern data here
+patternData:
 loadPatternData
+patternData.end:

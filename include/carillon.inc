@@ -18,6 +18,10 @@ DEF NUM_WAVEFORMS			EQU 16
 
 DEF NUM_SAMPLES				EQU 16
 
+DEF NUM_SONGS				EQU 8
+
+DEF NUM_VIBRATO				EQU 6
+
 ; 255 usable slots, last one is reserved for encoding a loop
 DEF ORDER_LIST_LEN			EQU 255
 
@@ -143,6 +147,7 @@ DEF G#5 RB
 DEF A_5 RB
 DEF A#5 RB
 DEF B_5 RB
+DEF UNR_NOTE RB
 DEF SMP EQU $FF
 
 ; Hacky, use negatives to define fancy stuff
@@ -162,7 +167,14 @@ DEF DN RB
 DEF TM RB
 DEF BR RB
 
-; Helper functions
+;; Helper functions
+
+MACRO carillon_log
+	IF DEF(CARILLON_LOG)
+		dbg_log \#
+	ENDC
+ENDM
+
 MACRO wavetable ; 0123456789ABCDEF0123456789ABCDEF
 	; Filter out unwanted characters
 	DEF UNWANTED_CHARS EQUS "\t ,"
@@ -293,14 +305,10 @@ ENDC
 
 IF !DEF(loadPanTable)
 MACRO loadPanTable
-.ch1:
-.ch2:
 .pulse:
 	ds NUM_INSTRUMENTS, $11
-.ch3:
 .wave:
 	ds NUM_INSTRUMENTS, $11
-.ch4:
 .noise:
 	ds NUM_INSTRUMENTS, $11
 .smp:

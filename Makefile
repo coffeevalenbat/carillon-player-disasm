@@ -42,7 +42,7 @@ all: ${ROM}
 
 # `clean`: Clean temp and bin files
 clean:
-	${RM_RF} bin obj assets
+	${RM_RF} bin obj assets dbg
 .PHONY: clean
 
 # `rebuild`: Build everything from scratch
@@ -83,6 +83,12 @@ bin/%.${ROMEXT}: $(patsubst src/%.asm,obj/%.o,${SRCS})
 	${RGBASM} ${ASFLAGS} -o obj/lib/build_date.o src/lib/build_date.asm
 	${RGBLINK} ${LDFLAGS} -m bin/$*.map -n bin/$*.sym -o $@ $^ \
 	&& ${RGBFIX} -v ${FIXFLAGS} $@
+	@# Create master DBG file that includes all files
+	echo "@debugfile 1.0.0\n" > bin/$*.dbg
+	@for debugfile in $(patsubst src/%.asm,dbg/%.dbg,${SRCS}) ; do \
+		echo "; $$debugfile" >> bin/$*.dbg ; \
+		cat $$debugfile >> bin/$*.dbg ; \
+	done
 
 # `.mk` files are auto-generated dependency lists of the source ASM files, to save a lot of hassle.
 # Also add all obj dependencies to the dep file too, so Make knows to remake it.
@@ -90,6 +96,10 @@ bin/%.${ROMEXT}: $(patsubst src/%.asm,obj/%.o,${SRCS})
 # (and produce weird errors).
 obj/%.mk: src/%.asm
 	@${MKDIR_P} "${@D}"
+	@# First build DBG file
+	@${MKDIR_P} $(dir $(patsubst obj/%,dbg/%,$@))
+	@${RGBASM} ${ASFLAGS} -DPRINT_DEBUGFILE -M $@ -MG -MP -MQ ${@:.mk=.o} -MQ $@ -o ${@:.mk=.o} $< > dbg/$*.dbg
+	@# Now actual ASM file
 	${RGBASM} ${ASFLAGS} -M $@ -MG -MP -MQ ${@:.mk=.o} -MQ $@ -o ${@:.mk=.o} $<
 # DO NOT merge this with the rule above, otherwise Make will assume that the `.o` file is generated,
 # even when it isn't!

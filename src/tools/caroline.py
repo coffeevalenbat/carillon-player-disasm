@@ -328,9 +328,9 @@ if __name__=='__main__':
 	outText += "\nIF DEF(loadPanTable)\nPURGE loadPanTable\nENDC\n"
 	outText += "\nMACRO loadPanTable\n"
 	panningLabels = [
-		".ch1:\n.ch2:\n.pulse:\n", 
-		".ch3:\n.wave:\n", 
-		".ch4:\n.noise:\n",
+		".pulse:\n", 
+		".wave:\n", 
+		".noise:\n",
 		".smp:\n"
 	]
 	for wInstType in range(3):

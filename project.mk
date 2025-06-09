@@ -4,6 +4,8 @@
 CARILLON_MODULE := assets/modules/oldschool.carillon
 # Enable sample playback
 ASFLAGS += -D_CARILLON_SAMPLE_PLAYBACK
+# Enable debug logging
+ASFLAGS += -DCARILLON_LOG
 
 # Value that the ROM will be filled with.
 PADVALUE := 0xFF

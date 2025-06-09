@@ -1,6 +1,6 @@
 ; Carillon player sample code
-include "hardware.inc"
 include "carillon.inc"
+include "debugfile.inc"
 
 SECTION "Sample Player code", ROMX
 Player_SampleUpdate::
@@ -8,19 +8,22 @@ carillonUpdateSample::
 	xor a
 	ld hl, wTrigCount
 	or [hl]
+	; If Z, either a sample is in the middle of playing or we aren't playing anything at all
 	jr z, .samplePlaying
 
-	; If waiting for a sample to start
+	; Otherwise tick down for a sample to start
 	xor a
 	dec [hl]
-	jr nz, .samplePlaying	
+	jr nz, .samplePlaying
+		; Reached zero, trigger new sample	
 		assert wTrigCount + 1 == wNewPanMask
 		inc l
+		; Read panning (Always $11, editor never opened these)
 		ldh a, [rAUDTERM]
 		and LOW(~(AUDTERM_3_LEFT | AUDTERM_3_RIGHT))
 		or [hl]
 		ldh [rAUDTERM], a
-		assert wNewPanMask + 1 == wNewSample
+		assert wNewPanMask + 1 == wNewSampleAddr
 		inc l
 		ld d, h
 		ld e, LOW(wSampleAddr)
@@ -50,7 +53,7 @@ carillonUpdateSample::
 	or [hl]
 	ret z
 
-	; If we processed the last block last call, mute channel
+	; If we processed the last block last call, finish and mute channel
 	dec [hl]
 	jr z, .finishSample
 	assert wSampleBlocksLeft - 1 == (wSampleAddr + 1)
@@ -62,6 +65,7 @@ carillonUpdateSample::
 	xor a
 	ldh [rAUD3ENA], a
 	FOR N, AUD3WAVE_SIZE
+		runtime_assert (hl < sampleData.end) && (hl >= sampleData), "Reading sample data outside section!"
 		ld a, [hli]
 		ldh [rAUD3WAVE_{X:N}], a
 	ENDR
@@ -83,3 +87,4 @@ carillonUpdateSample::
 
 sampleData::
 	loadSampleData
+sampleData.end::

@@ -3,14 +3,8 @@ include "hardware.inc"
 
 rev_Check_hardware_inc 4.11.0
 
-; Include music data
-include #_CARILLON_MODULE
-; And player
-include "src/carillon_player.gbz80"
-; And sample player if needed
-IF DEF(_CARILLON_SAMPLE_PLAYBACK)
-	include "src/sample_player.gbz80"
-ENDC
+; Include main music module
+include "src/carillon/carillon_stub.gbz80"
 
 ; RGB555 format color written to BGPD to display busy time
 DEF CGB_BUSY_COLOR	EQU $7FFF
